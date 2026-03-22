@@ -1,92 +1,194 @@
 // Ensure background music plays (handle autoplay restrictions)
 window.addEventListener('DOMContentLoaded', () => {
   const bgMusic = document.getElementById('bgMusic');
-  if (bgMusic) {
-    // Try to play immediately
-    const playPromise = bgMusic.play();
-    if (playPromise !== undefined) {
-      playPromise.catch(() => {
-        // If blocked, play on first user interaction
-        const resumeMusic = () => {
-          bgMusic.play();
-          window.removeEventListener('mousedown', resumeMusic);
-          window.removeEventListener('touchstart', resumeMusic);
-        };
-        window.addEventListener('mousedown', resumeMusic);
-        window.addEventListener('touchstart', resumeMusic);
-      });
-    }
+  if (!bgMusic) return;
+
+  const playPromise = bgMusic.play();
+  if (playPromise !== undefined) {
+    playPromise.catch(() => {
+      const resumeMusic = () => {
+        bgMusic.play();
+        window.removeEventListener('mousedown', resumeMusic);
+        window.removeEventListener('touchstart', resumeMusic);
+      };
+      window.addEventListener('mousedown', resumeMusic);
+      window.addEventListener('touchstart', resumeMusic);
+    });
   }
 });
-// PumpkinCrush Game Logic
-// Placeholder merge-style game inspired by Underwatermelon: Fruit Merge
 
-// PumpkinCrush - Clean Restart
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
 const imageSources = [
-  'IMG_1792.jpeg',
-  'IMG_1874.jpeg',
-  'IMG_2081.jpeg',
-  'IMG_2124.jpeg',
-  'IMG_2145.jpeg',
-  'IMG_2171.jpeg',
-  'IMG_3231.JPG',
-  'IMG_1144.jpeg',
-  'IMG_1052.jpeg',
-  'IMG_0740.jpeg'
+  'assets/attachments/IMG_1792.jpeg',
+  'assets/attachments/IMG_1874.jpeg',
+  'assets/attachments/IMG_2081.jpeg',
+  'assets/attachments/IMG_2124.jpeg',
+  'assets/attachments/IMG_2145.jpeg',
+  'assets/attachments/IMG_2171.jpeg',
+  'assets/attachments/IMG_3231.JPG',
+  'assets/attachments/IMG_1144.jpeg',
+  'assets/attachments/IMG_1052.jpeg',
+  'assets/attachments/IMG_0740.jpeg'
 ];
-const images = [];
 
+const PHYSICS_STEP_MS = 1000 / 60;
+const PHYSICS_DT = PHYSICS_STEP_MS / 1000;
+const MAX_FRAME_DELTA_MS = 34;
+const MAX_STEPS_PER_FRAME = 3;
+const HASH_CELL_SIZE = 96;
+
+const GRAVITY = 1450;
+const BOUNCE = 0.35;
+const AIR_DRAG = 0.997;
+const ROLL_FRICTION = 0.985;
+const SLEEP_VX_THRESHOLD = 8;
+const SLEEP_VY_THRESHOLD = 8;
+
+const FLOOR_HEIGHT = 40;
+const TOP_LOSS_LINE = 12;
+const PREVIEW_RADIUS = 27;
+
+const MIN_RADIUS = Math.round(18 * 2 * 0.75);
+const MAX_RADIUS = Math.round(36 * 2 * 0.75);
+
+const images = [];
+const ballSprites = [];
+let previewSprites = [];
 
 let balls = [];
 let score = 0;
 let comboComment = '';
 let comboTimeout = null;
 let dropIdx = 0;
-let dropping = false;
 let gameOver = false;
-
-// Store static pumpkin emoji positions
 let pumpkinPositions = [];
+
+let rafId = null;
+let lastFrameTime = 0;
+let physicsAccumulator = 0;
+let ballIdCounter = 1;
+
+let staticLayer = null;
+
+function radiusForIdx(imgIdx) {
+  return MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * (imgIdx / (images.length - 1));
+}
 
 function preloadImages(callback) {
   let loaded = 0;
+
   imageSources.forEach((src, i) => {
     const img = new Image();
     img.src = src;
+
     img.onload = () => {
-      loaded++;
       images[i] = img;
+      loaded += 1;
       if (loaded === imageSources.length) callback();
     };
+
     img.onerror = () => {
-      loaded++;
-      // Use a placeholder if image fails
       const fallback = document.createElement('canvas');
       fallback.width = 60;
       fallback.height = 60;
       const fctx = fallback.getContext('2d');
-      fctx.fillStyle = '#ccc';
+      fctx.fillStyle = '#cccccc';
       fctx.fillRect(0, 0, 60, 60);
-      fctx.fillStyle = '#888';
+      fctx.fillStyle = '#888888';
       fctx.font = 'bold 16px Arial';
-      fctx.fillText('No Img', 5, 30);
+      fctx.fillText('No Img', 5, 34);
       images[i] = fallback;
+      loaded += 1;
       if (loaded === imageSources.length) callback();
     };
   });
 }
 
+function createCircularSprite(sourceImage, radius, zoomScale) {
+  const size = Math.ceil(radius * 2);
+  const sprite = document.createElement('canvas');
+  sprite.width = size;
+  sprite.height = size;
+
+  const sctx = sprite.getContext('2d');
+  sctx.clearRect(0, 0, size, size);
+  sctx.save();
+  sctx.beginPath();
+  sctx.arc(radius, radius, radius, 0, Math.PI * 2);
+  sctx.clip();
+
+  const drawSize = size * zoomScale;
+  const drawOffset = (size - drawSize) / 2;
+  sctx.drawImage(sourceImage, drawOffset, drawOffset, drawSize, drawSize);
+  sctx.restore();
+
+  return sprite;
+}
+
+function buildSpriteCaches() {
+  for (let i = 0; i < images.length; i += 1) {
+    ballSprites[i] = createCircularSprite(images[i], radiusForIdx(i), 1.5);
+  }
+
+  previewSprites = images.map((img) => createCircularSprite(img, PREVIEW_RADIUS, 1.0));
+}
+
+function buildStaticLayer() {
+  staticLayer = document.createElement('canvas');
+  staticLayer.width = canvas.width;
+  staticLayer.height = canvas.height;
+
+  const sctx = staticLayer.getContext('2d');
+  sctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  sctx.save();
+  sctx.strokeStyle = '#ff2222';
+  sctx.lineWidth = 6;
+  sctx.beginPath();
+  sctx.moveTo(0, 6);
+  sctx.lineTo(canvas.width, 6);
+  sctx.stroke();
+  sctx.restore();
+
+  sctx.save();
+  sctx.fillStyle = '#00ff00';
+  sctx.fillRect(0, canvas.height - FLOOR_HEIGHT, canvas.width, FLOOR_HEIGHT);
+  sctx.restore();
+
+  sctx.save();
+  sctx.font = '32px Arial';
+  sctx.textAlign = 'center';
+  sctx.textBaseline = 'middle';
+  for (let i = 0; i < pumpkinPositions.length; i += 1) {
+    const pos = pumpkinPositions[i];
+    sctx.fillText('🎃', pos.x, pos.y);
+  }
+  sctx.restore();
+
+  sctx.save();
+  sctx.strokeStyle = '#00aa00';
+  sctx.lineWidth = 4;
+  sctx.strokeRect(0, 0, canvas.width, canvas.height);
+  sctx.restore();
+
+  sctx.save();
+  sctx.font = 'bold 18px Arial';
+  sctx.fillStyle = '#333333';
+  sctx.textAlign = 'center';
+  sctx.fillText('Made by Tom', canvas.width / 2, canvas.height - 10);
+  sctx.restore();
+}
 
 function renderLegend() {
   const legendDiv = document.getElementById('photoLegend');
   legendDiv.innerHTML = '';
-  imageSources.forEach((src, idx) => {
+
+  for (let idx = 0; idx < imageSources.length; idx += 1) {
     let img;
+
     if (idx === imageSources.length - 1) {
-      // Mystery for highest value
       img = document.createElement('div');
       img.style.width = '40px';
       img.style.height = '40px';
@@ -95,118 +197,416 @@ function renderLegend() {
       img.style.display = 'inline-flex';
       img.style.alignItems = 'center';
       img.style.justifyContent = 'center';
-      img.style.background = '#eee';
+      img.style.background = '#eeeeee';
       img.style.fontWeight = 'bold';
       img.style.fontSize = '24px';
-      img.style.color = '#888';
+      img.style.color = '#888888';
       img.textContent = '?';
     } else {
       img = document.createElement('img');
-      img.src = src;
+      img.src = imageSources[idx];
       img.style.width = '40px';
       img.style.height = '40px';
       img.style.borderRadius = '50%';
       img.style.margin = '4px';
     }
+
     legendDiv.appendChild(img);
+
     const value = document.createElement('span');
     value.textContent = ` = ${10 * (idx + 1) + (idx > 6 ? 40 : idx > 2 ? 20 : 0)} pts`;
     value.style.marginRight = '16px';
     legendDiv.appendChild(value);
-  });
+  }
 }
 
+function randomDropIdx() {
+  const lowPool = [0, 1, 2];
+  return lowPool[Math.floor(Math.random() * lowPool.length)];
+}
+
+function createBall(x, y, imgIdx) {
+  return {
+    id: ballIdCounter++,
+    x,
+    y,
+    vx: 0,
+    vy: 0,
+    imgIdx,
+    radius: radiusForIdx(imgIdx),
+    sleeping: false
+  };
+}
 
 function startGame() {
   balls = [];
   score = 0;
-  // Only allow lowest 3 scoring images to be dropped
-  dropIdx = [0, 1, 2][Math.floor(Math.random() * 3)];
-  gameOver = false;
   comboComment = '';
-  // Generate static pumpkin emoji positions
+  gameOver = false;
+  dropIdx = randomDropIdx();
+  ballIdCounter = 1;
+
   pumpkinPositions = [];
   const pumpkinCount = Math.floor(canvas.width / 60);
-  const pumpkinY = canvas.height - 40; // Align exactly at the top of the green ground
-  for (let j = 0; j < pumpkinCount; j++) {
-    const px = Math.random() * (canvas.width - 40) + 20;
-    pumpkinPositions.push({ x: px, y: pumpkinY });
+  const pumpkinY = canvas.height - FLOOR_HEIGHT;
+  for (let j = 0; j < pumpkinCount; j += 1) {
+    pumpkinPositions.push({
+      x: Math.random() * (canvas.width - 40) + 20,
+      y: pumpkinY
+    });
   }
-  drawBoard();
+
+  buildStaticLayer();
+  render();
 }
 
+function handleDrop(event) {
+  if (gameOver) return;
 
-function drawBoard() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  // Draw red line at top
-  ctx.save();
-  ctx.strokeStyle = '#ff2222';
-  ctx.lineWidth = 6;
-  ctx.beginPath();
-  ctx.moveTo(0, 6);
-  ctx.lineTo(canvas.width, 6);
-  ctx.stroke();
-  ctx.restore();
-  // Draw green ground
-  ctx.save();
-  ctx.fillStyle = '#00ff00';
-  ctx.fillRect(0, canvas.height - 40, canvas.width, 40);
-  ctx.restore();
-  // ...existing code...
+  const point = event.touches && event.touches.length ? event.touches[0] : event;
+  const rect = canvas.getBoundingClientRect();
+  const relX = point.clientX - rect.left;
 
-  // Draw static pumpkin emojis above the grass
-  ctx.save();
-  ctx.font = '32px Arial';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  for (let pos of pumpkinPositions) {
-    ctx.fillText('🎃', pos.x, pos.y);
+  const colWidth = canvas.width / images.length;
+  const col = Math.max(0, Math.min(images.length - 1, Math.floor(relX / colWidth)));
+  dropBall(col);
+}
+
+function dropBall(col) {
+  if (gameOver) return;
+
+  const imgIdx = dropIdx;
+  const radius = radiusForIdx(imgIdx);
+  const colWidth = canvas.width / images.length;
+  const x = Math.max(
+    radius,
+    Math.min(col * colWidth + colWidth / 2, canvas.width - radius)
+  );
+
+  let y = 80;
+  for (let t = 0; t < 16; t += 1) {
+    let hasOverlap = false;
+
+    for (let i = 0; i < balls.length; i += 1) {
+      const other = balls[i];
+      const dx = x - other.x;
+      const dy = y - other.y;
+      const minDist = radius + other.radius;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < minDist * minDist) {
+        const dist = Math.sqrt(distSq) || 1;
+        y += (minDist - dist) + 1;
+        hasOverlap = true;
+      }
+    }
+
+    if (!hasOverlap) break;
   }
-  ctx.restore();
-  // Draw border
-  ctx.save();
-  ctx.strokeStyle = '#00aa00';
-  ctx.lineWidth = 4;
-  ctx.strokeRect(0, 0, canvas.width, canvas.height);
-  ctx.restore();
-  // Draw preview ball
-  const minRadius = Math.round(18 * 2);
-  const maxRadius = Math.round(36 * 2);
-  const previewRadius = Math.round(27); // Fixed normal size for preview
-  const previewImgSize = previewRadius * 2;
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(canvas.width / 2, 40, previewRadius, 0, 2 * Math.PI);
-  ctx.clip();
-  ctx.drawImage(images[dropIdx], canvas.width / 2 - previewImgSize / 2, 40 - previewImgSize / 2, previewImgSize, previewImgSize);
-  ctx.restore();
-  // ...existing code...
-  // Draw balls
-  balls.forEach(ball => {
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(ball.x, ball.y, ball.radius, 0, 2 * Math.PI);
-    ctx.clip();
-    const imgSize = ball.radius * 2 * 1.5;
-    ctx.drawImage(images[ball.imgIdx], ball.x - imgSize / 2, ball.y - imgSize / 2, imgSize, imgSize);
-    ctx.restore();
+
+  const floorY = canvas.height - FLOOR_HEIGHT - radius;
+  y = Math.min(y, floorY);
+
+  balls.push(createBall(x, y, imgIdx));
+  dropIdx = randomDropIdx();
+}
+
+function hashKey(cx, cy) {
+  return `${cx},${cy}`;
+}
+
+function buildSpatialHash() {
+  const hash = new Map();
+
+  for (let i = 0; i < balls.length; i += 1) {
+    const ball = balls[i];
+    const cellX = Math.floor(ball.x / HASH_CELL_SIZE);
+    const cellY = Math.floor(ball.y / HASH_CELL_SIZE);
+    const key = hashKey(cellX, cellY);
+
+    if (!hash.has(key)) hash.set(key, []);
+    hash.get(key).push(i);
+  }
+
+  return hash;
+}
+
+function resolveWorldBounds(ball) {
+  const floorY = canvas.height - FLOOR_HEIGHT - ball.radius;
+
+  if (ball.x - ball.radius < 0) {
+    ball.x = ball.radius;
+    if (ball.vx < 0) ball.vx = -ball.vx * BOUNCE;
+    ball.sleeping = false;
+  }
+
+  if (ball.x + ball.radius > canvas.width) {
+    ball.x = canvas.width - ball.radius;
+    if (ball.vx > 0) ball.vx = -ball.vx * BOUNCE;
+    ball.sleeping = false;
+  }
+
+  if (ball.y > floorY) {
+    ball.y = floorY;
+    if (ball.vy > 0) ball.vy = -ball.vy * BOUNCE;
+    ball.vx *= ROLL_FRICTION;
+    if (Math.abs(ball.vy) < SLEEP_VY_THRESHOLD) ball.vy = 0;
+    ball.sleeping = false;
+  }
+}
+
+function solveCollision(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const minDist = a.radius + b.radius;
+  const distSq = dx * dx + dy * dy;
+
+  if (distSq >= minDist * minDist) return false;
+
+  const dist = Math.sqrt(distSq) || 0.0001;
+  const nx = dx / dist;
+  const ny = dy / dist;
+  const overlap = minDist - dist;
+
+  const separation = overlap * 0.5;
+  a.x -= nx * separation;
+  a.y -= ny * separation;
+  b.x += nx * separation;
+  b.y += ny * separation;
+
+  const rvx = b.vx - a.vx;
+  const rvy = b.vy - a.vy;
+  const velAlongNormal = rvx * nx + rvy * ny;
+
+  if (velAlongNormal < 0) {
+    const impulse = -(1 + BOUNCE) * velAlongNormal * 0.5;
+    a.vx -= impulse * nx;
+    a.vy -= impulse * ny;
+    b.vx += impulse * nx;
+    b.vy += impulse * ny;
+  }
+
+  a.sleeping = false;
+  b.sleeping = false;
+  return true;
+}
+
+function handleMergePair(a, b, pendingRemoval, additions) {
+  if (a.imgIdx !== b.imgIdx || a.imgIdx >= images.length - 1) return false;
+
+  pendingRemoval.add(a.id);
+  pendingRemoval.add(b.id);
+
+  const newIdx = a.imgIdx + 1;
+  const newRadius = radiusForIdx(newIdx);
+  const floorY = canvas.height - FLOOR_HEIGHT - newRadius;
+
+  additions.push({
+    x: (a.x + b.x) * 0.5,
+    y: Math.min((a.y + b.y) * 0.5, floorY),
+    imgIdx: newIdx
   });
-  // Draw score
+
+  const points = (newIdx + 1) * 10 + (newIdx > 6 ? 40 : newIdx > 2 ? 20 : 0);
+  score += points;
+
+  if (points >= 70) {
+    const comments = [
+      'Nice work!',
+      'Go plumps!',
+      'Go pumpkin!',
+      'Awesome combo!',
+      'Pumpkin power!',
+      'That was juicy!',
+      'Combo master!',
+      'Go plumpy!',
+      '#sweetman',
+      'Go jessica!',
+      'plum plum PLUM!',
+      'Jessica-level combo!',
+      'Jessica says send it!',
+      'Pumpkin train incoming!',
+      'Pumpkin stack attack!',
+      'Pumpkin legend energy!',
+      'Pumpkin party mode!',
+      'Pumpkin to the moon!',
+      'Absolute pumpkin cinema!',
+      '#sweetman approved!',
+      '#sweetman certified combo!',
+      '#sweetman momentum!',
+      '#sweetman no brakes!',
+      '#paddington powers activated!',
+      '#paddington with the carry!',
+      '#paddington combo report!',
+      '#paddington undefeated!',
+      'Acai bowl buff active!',
+      'Acai bowl energy spike!',
+      'Extra granola combo!',
+      'Berry smooth merge!',
+      'Acai bowl MVP!',
+      'Marianara drip unlocked!',
+      'Marianara mode: simmering!',
+      'Spicy marianara combo!',
+      'Double marianara special!',
+      'Marinara Chilli Prawn Pasta!',
+      'Ollie approves this combo!',
+      'Coco says keep merging!',
+      'Ollie and Coco power-up!',
+      'Combo zoomies for Ollie!',
+      'Coco-level clutch move!',
+      'Ollie x Coco unstoppable!',
+      'Mt Coolum momentum!',
+      'Mt Coolum altitude gained!',
+      'Peak Mt Coolum gameplay!',
+      'Mt Coolum summit combo!',
+      'Coolum climb complete!',
+      'Jessica x Pumpkin crossover!',
+      'Pumpkin + acai synergy!',
+      'Sweetman signal detected!',
+      'Paddington pressure applied!',
+      'This merge has flavor!',
+      'That one was delicious!',
+      'Certified juicy mechanics!',
+      'Sky full of pumpkins!',
+      'Ballin through Brisbane!',
+      'No crumbs left behind!',
+      'Merge machine online!',
+      'Keep cooking!',
+      'That was CLEAN!',
+      'Monster merge!',
+      'Combo storm!',
+      'Big pumpkin business!',
+      'Flavor combo achieved!',
+      'You are unstoppable!'
+    ];
+
+    comboComment = comments[Math.floor(Math.random() * comments.length)];
+    if (comboTimeout) clearTimeout(comboTimeout);
+    comboTimeout = setTimeout(() => {
+      comboComment = '';
+    }, 2000);
+  }
+
+  return true;
+}
+
+function stepPhysics() {
+  if (gameOver) return;
+
+  for (let i = 0; i < balls.length; i += 1) {
+    const ball = balls[i];
+
+    if (ball.sleeping) continue;
+
+    ball.vy += GRAVITY * PHYSICS_DT;
+    ball.vx *= AIR_DRAG;
+    ball.vy *= AIR_DRAG;
+
+    ball.x += ball.vx * PHYSICS_DT;
+    ball.y += ball.vy * PHYSICS_DT;
+
+    resolveWorldBounds(ball);
+
+    if (
+      ball.y >= (canvas.height - FLOOR_HEIGHT - ball.radius - 0.5) &&
+      Math.abs(ball.vx) < SLEEP_VX_THRESHOLD &&
+      Math.abs(ball.vy) < SLEEP_VY_THRESHOLD
+    ) {
+      ball.vx = 0;
+      ball.vy = 0;
+      ball.sleeping = true;
+    }
+  }
+
+  const hash = buildSpatialHash();
+  const pendingRemoval = new Set();
+  const additions = [];
+
+  for (let i = 0; i < balls.length; i += 1) {
+    const a = balls[i];
+    if (pendingRemoval.has(a.id)) continue;
+
+    const cellX = Math.floor(a.x / HASH_CELL_SIZE);
+    const cellY = Math.floor(a.y / HASH_CELL_SIZE);
+
+    for (let ox = -1; ox <= 1; ox += 1) {
+      for (let oy = -1; oy <= 1; oy += 1) {
+        const key = hashKey(cellX + ox, cellY + oy);
+        const bucket = hash.get(key);
+        if (!bucket) continue;
+
+        for (let bIdx = 0; bIdx < bucket.length; bIdx += 1) {
+          const j = bucket[bIdx];
+          if (j <= i) continue;
+
+          const b = balls[j];
+          if (pendingRemoval.has(b.id)) continue;
+
+          if (!solveCollision(a, b)) continue;
+
+          if (handleMergePair(a, b, pendingRemoval, additions)) {
+            break;
+          }
+
+          resolveWorldBounds(a);
+          resolveWorldBounds(b);
+        }
+
+        if (pendingRemoval.has(a.id)) break;
+      }
+      if (pendingRemoval.has(a.id)) break;
+    }
+  }
+
+  if (pendingRemoval.size > 0 || additions.length > 0) {
+    const survivors = [];
+
+    for (let i = 0; i < balls.length; i += 1) {
+      if (!pendingRemoval.has(balls[i].id)) survivors.push(balls[i]);
+    }
+
+    for (let i = 0; i < additions.length; i += 1) {
+      const merged = additions[i];
+      survivors.push(createBall(merged.x, merged.y, merged.imgIdx));
+    }
+
+    balls = survivors;
+  }
+
+  for (let i = 0; i < balls.length; i += 1) {
+    const ball = balls[i];
+    if (ball.y - ball.radius < TOP_LOSS_LINE) {
+      gameOver = true;
+      break;
+    }
+  }
+}
+
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (staticLayer) {
+    ctx.drawImage(staticLayer, 0, 0);
+  }
+
+  const preview = previewSprites[dropIdx];
+  if (preview) {
+    ctx.drawImage(preview, canvas.width / 2 - PREVIEW_RADIUS, 40 - PREVIEW_RADIUS);
+  }
+
+  for (let i = 0; i < balls.length; i += 1) {
+    const ball = balls[i];
+    const sprite = ballSprites[ball.imgIdx];
+    if (!sprite) continue;
+    ctx.drawImage(sprite, ball.x - ball.radius, ball.y - ball.radius);
+  }
+
   ctx.save();
   ctx.font = 'bold 20px Arial';
   ctx.fillStyle = '#ff9900';
-  ctx.fillText('Score: ' + score, 10, 30);
+  ctx.textAlign = 'left';
+  ctx.fillText(`Score: ${score}`, 10, 30);
   ctx.restore();
 
-  // Draw "Made by Tom" at the bottom
-  ctx.save();
-  ctx.font = 'bold 18px Arial';
-  ctx.fillStyle = '#333';
-  ctx.textAlign = 'center';
-  ctx.fillText('Made by Tom', canvas.width / 2, canvas.height - 10);
-  ctx.restore();
-
-  // Draw combo comment if present
   if (comboComment) {
     ctx.save();
     ctx.font = 'bold 28px Arial';
@@ -215,7 +615,7 @@ function drawBoard() {
     ctx.fillText(comboComment, canvas.width / 2, canvas.height / 2);
     ctx.restore();
   }
-  // Draw game over message
+
   if (gameOver) {
     ctx.save();
     ctx.font = 'bold 32px Arial';
@@ -224,226 +624,48 @@ function drawBoard() {
     ctx.fillText('Nice work plumps!', canvas.width / 2, canvas.height / 2 - 20);
     ctx.font = 'bold 24px Arial';
     ctx.fillStyle = '#ff9900';
-    ctx.fillText('Total Score: ' + score, canvas.width / 2, canvas.height / 2 + 20);
+    ctx.fillText(`Total Score: ${score}`, canvas.width / 2, canvas.height / 2 + 20);
     ctx.restore();
   }
 }
 
+function gameLoop(timestamp) {
+  if (!lastFrameTime) lastFrameTime = timestamp;
+
+  const frameDelta = Math.min(MAX_FRAME_DELTA_MS, timestamp - lastFrameTime);
+  lastFrameTime = timestamp;
+  physicsAccumulator += frameDelta;
+
+  let substeps = 0;
+  while (physicsAccumulator >= PHYSICS_STEP_MS && substeps < MAX_STEPS_PER_FRAME) {
+    stepPhysics();
+    physicsAccumulator -= PHYSICS_STEP_MS;
+    substeps += 1;
+  }
+
+  if (physicsAccumulator > PHYSICS_STEP_MS * 2) {
+    physicsAccumulator = PHYSICS_STEP_MS;
+  }
+
+  render();
+  rafId = requestAnimationFrame(gameLoop);
+}
+
+function startLoop() {
+  if (rafId) cancelAnimationFrame(rafId);
+  rafId = null;
+  lastFrameTime = 0;
+  physicsAccumulator = 0;
+  rafId = requestAnimationFrame(gameLoop);
+}
 
 canvas.addEventListener('mousedown', handleDrop);
-canvas.addEventListener('touchstart', handleDrop);
+canvas.addEventListener('touchstart', handleDrop, { passive: true });
 document.getElementById('restartBtn').addEventListener('click', startGame);
 
-
-function handleDrop(e) {
-  if (gameOver) return;
-  let clientX = e.touches && e.touches.length ? e.touches[0].clientX : e.clientX;
-  const rect = canvas.getBoundingClientRect();
-  const col = Math.floor((clientX - rect.left) / (canvas.width / images.length));
-  dropBall(col);
-}
-
-
-
-function dropBall(col) {
-  if (gameOver) return;
-  // Ball size based on image index (point value)
-  const minRadius = Math.round(18 * 2 * 0.75);
-  const maxRadius = Math.round(36 * 2 * 0.75);
-  const imgIdx = dropIdx;
-  const radius = minRadius + (maxRadius - minRadius) * (imgIdx / (images.length - 1));
-  const x = Math.max(radius, Math.min(col * (canvas.width / images.length) + (canvas.width / images.length) / 2, canvas.width - radius));
-  let y = 80;
-  // Prevent overlap on spawn
-  let tries = 0;
-  let maxTries = 20;
-  let overlap = false;
-  do {
-    overlap = false;
-    for (let other of balls) {
-      let dx = x - other.x;
-      let dy = y - other.y;
-      let dist = Math.sqrt(dx * dx + dy * dy);
-      let minDist = radius + other.radius;
-      if (dist < minDist) {
-        y += minDist - dist + 2; // Move down
-        overlap = true;
-      }
-    }
-    tries++;
-  } while (overlap && tries < maxTries);
-  balls.push({ x, y, radius, imgIdx, vy: 0, vx: 0 });
-  // Only allow lowest 3 scoring images to be dropped
-  dropIdx = [0, 1, 2][Math.floor(Math.random() * 3)];
-  animateBall(balls[balls.length - 1]);
-}
-
-
-
-
-
-
-
-
-function animateBall(ball) {
-  function step() {
-    if (gameOver) return;
-    // Ball physics
-    const gravity = 1.5;
-    const bounce = 0.4; // Lower bounce
-    const friction = 0.95; // Lower friction
-    const rollFriction = 0.90; // Higher roll friction
-    ball.vy += gravity;
-    ball.y += ball.vy;
-    ball.x += ball.vx;
-    let stopped = false;
-    // Classic elastic collision and overlap resolution
-    const groundY = canvas.height - 40;
-    const leftBound = 0;
-    const rightBound = canvas.width;
-    for (let other of balls) {
-      if (other === ball) continue;
-      let dx = ball.x - other.x;
-      let dy = ball.y - other.y;
-      let dist = Math.sqrt(dx * dx + dy * dy);
-      let minDist = ball.radius + other.radius;
-      if (dist < minDist) {
-        // Elastic collision and stacking
-        let overlap = minDist - dist;
-        // Cap maximum overlap correction to prevent teleporting
-        const maxCorrection = Math.min(overlap, Math.max(ball.radius, other.radius) * 0.3); // Lower correction for big balls
-        let nx = dx / (dist || 1);
-        let ny = dy / (dist || 1);
-        ball.x += nx * maxCorrection / 2;
-        ball.y += ny * maxCorrection / 2 + 1; // Add buffer for gentle stacking
-        other.x -= nx * maxCorrection / 2;
-        other.y -= ny * maxCorrection / 2 + 1;
-        // Clamp balls gently above ground
-        ball.y = Math.min(ball.y, canvas.height - 40 - ball.radius + 2);
-        other.y = Math.min(other.y, canvas.height - 40 - other.radius + 2);
-        // Clamp both balls within bounds
-        ball.x = Math.max(leftBound + ball.radius, Math.min(rightBound - ball.radius, ball.x));
-        other.x = Math.max(leftBound + other.radius, Math.min(rightBound - other.radius, other.x));
-        // Exchange velocities (both axes)
-        let v1x = ball.vx || 0;
-        let v2x = other.vx || 0;
-        let v1y = ball.vy;
-        let v2y = other.vy;
-        ball.vx = v2x * bounce;
-        other.vx = v1x * bounce;
-        ball.vy = v2y * bounce;
-        other.vy = v1y * bounce;
-        if (ball.y < other.y && Math.abs(ball.vy) < 1) ball.vy = 0;
-        if (Math.abs(nx) > 0.7 && Math.abs(ball.vx) < 0.1) ball.vx += nx * 2;
-      }
-    }
-    // Clamp ball within bounds after physics/collision
-    ball.x = Math.max(leftBound + ball.radius, Math.min(rightBound - ball.radius, ball.x));
-    // Only clamp y to ground if below ground
-    if (ball.y > groundY - ball.radius) ball.y = groundY - ball.radius;
-    // Check collision with red line (game over)
-    if (ball.y - ball.radius < 12) {
-      gameOver = true;
-      drawBoard();
-      return;
-    }
-    // Check collision with ground
-    const floorY = canvas.height - 40 - ball.radius;
-    if (ball.y > floorY) {
-      ball.y = floorY;
-      ball.vy = -ball.vy * bounce;
-      if (Math.abs(ball.vy) < 1) ball.vy = 0;
-      if (Math.abs(ball.vx) > 0.1) ball.vx *= rollFriction;
-      else ball.vx = 0;
-      if (Math.abs(ball.vy) < 1 && Math.abs(ball.vx) < 0.1) stopped = true;
-    }
-    // Wall collision (never let balls go through borders)
-    if (ball.x - ball.radius < 0) {
-      ball.x = ball.radius;
-      if (ball.vx < 0) ball.vx = -ball.vx * bounce;
-    }
-    if (ball.x + ball.radius > canvas.width) {
-      ball.x = canvas.width - ball.radius;
-      if (ball.vx > 0) ball.vx = -ball.vx * bounce;
-    }
-    // Ball-ball collision and merging
-    for (let other of balls) {
-      if (other === ball) continue;
-      let dx = ball.x - other.x;
-      let dy = ball.y - other.y;
-      let dist = Math.sqrt(dx * dx + dy * dy);
-      let minDist = ball.radius + other.radius;
-      if (dist < minDist) {
-        // Merge if same type (basic), only if both balls still exist and balls.length >= 2
-        if (
-          ball.imgIdx === other.imgIdx &&
-          ball.imgIdx < images.length - 1 &&
-          balls.includes(ball) && balls.includes(other) && balls.length >= 2
-        ) {
-          const minRadius = Math.round(18 * 2 * 0.75);
-          const maxRadius = Math.round(36 * 2 * 0.75);
-          const newIdx = ball.imgIdx + 1;
-          const newRadius = minRadius + (maxRadius - minRadius) * (newIdx / (images.length - 1));
-          const groundY = canvas.height - 40 - newRadius;
-          const newBall = {
-            x: (ball.x + other.x) / 2,
-            y: groundY,
-            radius: newRadius,
-            imgIdx: newIdx,
-            vy: 0,
-            vx: 0
-          };
-          balls.splice(balls.indexOf(ball), 1);
-          balls.splice(balls.indexOf(other), 1);
-          balls.push(newBall);
-          const points = (newIdx + 1) * 10 + (newIdx > 6 ? 40 : newIdx > 2 ? 20 : 0);
-          score += points;
-          drawBoard();
-          if (points >= 70) {
-            const comments = [
-              'Nice work!',
-              'Go plumps!',
-              'Go pumpkin!',
-              'Awesome combo!',
-              'Pumpkin power!',
-              'That was juicy!',
-              'Combo master!',
-              'Go plumpy!',
-              '#sweetman',
-              'Go jessica!',
-              'plum plum PLUM!'
-            ];
-            comboComment = comments[Math.floor(Math.random() * comments.length)];
-            if (comboTimeout) clearTimeout(comboTimeout);
-            comboTimeout = setTimeout(() => {
-              comboComment = '';
-              drawBoard();
-            }, 2000);
-          }
-          animateBall(newBall); // Animate merged ball
-          return;
-        }
-        // Basic elastic collision
-        let overlap = minDist - dist;
-        let nx = dx / (dist || 1);
-        let ny = dy / (dist || 1);
-        ball.x += nx * overlap / 2;
-        ball.y += ny * overlap / 2;
-        other.x -= nx * overlap / 2;
-        other.y -= ny * overlap / 2;
-      }
-    }
-    ball.vy *= friction;
-    drawBoard();
-    if (!stopped) {
-      requestAnimationFrame(step);
-    }
-  }
-  step();z
-}
-
 preloadImages(() => {
-  startGame();
+  buildSpriteCaches();
   renderLegend();
+  startGame();
+  startLoop();
 });
-
