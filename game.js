@@ -21,16 +21,16 @@ const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
 const imageSources = [
-  'assets/attachments/IMG_1792.jpeg',
-  'assets/attachments/IMG_1874.jpeg',
-  'assets/attachments/IMG_2081.jpeg',
-  'assets/attachments/IMG_2124.jpeg',
-  'assets/attachments/IMG_2145.jpeg',
-  'assets/attachments/IMG_2171.jpeg',
-  'assets/attachments/IMG_3231.JPG',
-  'assets/attachments/IMG_1144.jpeg',
-  'assets/attachments/IMG_1052.jpeg',
-  'assets/attachments/IMG_0740.jpeg'
+  'IMG_1792.jpeg',
+  'IMG_1874.jpeg',
+  'IMG_2081.jpeg',
+  'IMG_2124.jpeg',
+  'IMG_2145.jpeg',
+  'IMG_2171.jpeg',
+  'IMG_3231.JPG',
+  'IMG_1144.jpeg',
+  'IMG_1052.jpeg',
+  'IMG_0740.jpeg'
 ];
 
 const PHYSICS_STEP_MS = 1000 / 60;
